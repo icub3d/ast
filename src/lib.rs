@@ -80,20 +80,9 @@ pub enum Expr {
 /// assert_eq!(expr, ast::Expr::Float(-3.14));
 /// ```
 pub fn parse_number(input: &str) -> IResult<&str, Expr> {
-    // Check for optional minus sign at the beginning
-    let sign_result: Result<(&str, char), nom::Err<nom::error::Error<&str>>> = char('-')(input);
-    let (input, sign) = if let Ok((input, _)) = sign_result {
-        (input, true) // Found minus sign
-    } else {
-        (input, false) // No minus sign, positive number
-    };
-
-    // Parse the numeric value using nom's double parser
+    // nom's double parser can handle negative numbers directly
     let (input, num) = double(input)?;
-
-    // Apply the sign if negative
-    let final_num = if sign { -num } else { num };
-    Ok((input, Expr::Float(final_num)))
+    Ok((input, Expr::Float(num)))
 }
 
 /// Parse an expression wrapped in parentheses
@@ -163,28 +152,21 @@ fn parse_term(input: &str) -> IResult<&str, Expr> {
     loop {
         let (input_after_whitespace, _) = multispace0(remaining)?;
 
-        // Try to parse multiplication operator
-        let mult_result: Result<(&str, char), nom::Err<nom::error::Error<&str>>> =
-            char('*')(input_after_whitespace);
-        match mult_result {
-            Ok((new_input, _)) => {
-                let (new_input, right) = parse_factor(new_input)?;
-                left = Expr::Mul(Box::new(left), Box::new(right));
-                remaining = new_input;
-            }
-            Err(_) => {
-                // Try to parse division operator
-                let div_result: Result<(&str, char), nom::Err<nom::error::Error<&str>>> =
-                    char('/')(input_after_whitespace);
-                match div_result {
-                    Ok((new_input, _)) => {
-                        let (new_input, right) = parse_factor(new_input)?;
-                        left = Expr::Div(Box::new(left), Box::new(right));
-                        remaining = new_input;
-                    }
-                    Err(_) => break, // No more multiplication or division operators
-                }
-            }
+        // Try to parse multiplication or division operator
+        if let Ok((new_input, _)) =
+            char::<&str, nom::error::Error<&str>>('*')(input_after_whitespace)
+        {
+            let (new_input, right) = parse_factor(new_input)?;
+            left = Expr::Mul(Box::new(left), Box::new(right));
+            remaining = new_input;
+        } else if let Ok((new_input, _)) =
+            char::<&str, nom::error::Error<&str>>('/')(input_after_whitespace)
+        {
+            let (new_input, right) = parse_factor(new_input)?;
+            left = Expr::Div(Box::new(left), Box::new(right));
+            remaining = new_input;
+        } else {
+            break; // No more multiplication or division operators
         }
     }
 
@@ -243,28 +225,21 @@ pub fn parse_expression(input: &str) -> IResult<&str, Expr> {
     loop {
         let (input_after_whitespace, _) = multispace0(remaining)?;
 
-        // Try to parse addition operator
-        let add_result: Result<(&str, char), nom::Err<nom::error::Error<&str>>> =
-            char('+')(input_after_whitespace);
-        match add_result {
-            Ok((new_input, _)) => {
-                let (new_input, right) = parse_term(new_input)?;
-                left = Expr::Add(Box::new(left), Box::new(right));
-                remaining = new_input;
-            }
-            Err(_) => {
-                // Try to parse subtraction operator
-                let sub_result: Result<(&str, char), nom::Err<nom::error::Error<&str>>> =
-                    char('-')(input_after_whitespace);
-                match sub_result {
-                    Ok((new_input, _)) => {
-                        let (new_input, right) = parse_term(new_input)?;
-                        left = Expr::Sub(Box::new(left), Box::new(right));
-                        remaining = new_input;
-                    }
-                    Err(_) => break, // No more addition or subtraction operators
-                }
-            }
+        // Try to parse addition or subtraction operator
+        if let Ok((new_input, _)) =
+            char::<&str, nom::error::Error<&str>>('+')(input_after_whitespace)
+        {
+            let (new_input, right) = parse_term(new_input)?;
+            left = Expr::Add(Box::new(left), Box::new(right));
+            remaining = new_input;
+        } else if let Ok((new_input, _)) =
+            char::<&str, nom::error::Error<&str>>('-')(input_after_whitespace)
+        {
+            let (new_input, right) = parse_term(new_input)?;
+            left = Expr::Sub(Box::new(left), Box::new(right));
+            remaining = new_input;
+        } else {
+            break; // No more addition or subtraction operators
         }
     }
 
