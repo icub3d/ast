@@ -1,17 +1,9 @@
-//! # AST Calculator
+//! AST Calculator
 //!
 //! A mathematical expression parser and evaluator that builds Abstract Syntax Trees (ASTs).
 //! This calculator demonstrates recursive descent parsing using the `nom` parser combinator library.
 //!
-//! ## Features
-//! - Parses mathematical expressions with proper operator precedence
-//! - Supports addition (+), subtraction (-), multiplication (*), and division (/)
-//! - Handles parentheses for grouping operations
-//! - Works with floating-point numbers (including decimals and negative numbers)
-//! - Provides detailed error handling for invalid expressions and division by zero
-//! - Interactive REPL (Read-Eval-Print Loop) for testing expressions
-//!
-//! ## Example Usage
+//! # Example
 //! ```
 //! use ast::{parse_expression, evaluate};
 //!
@@ -39,20 +31,38 @@ pub enum EvaluationError {
 
 /// Abstract Syntax Tree representation of mathematical expressions
 ///
-/// Each variant represents a different type of mathematical operation or value:
-/// - `Float`: A numeric literal (e.g., 3.14, -5.0, 42)
-/// - `Add`: Addition operation (left + right)
-/// - `Sub`: Subtraction operation (left - right)
-/// - `Mul`: Multiplication operation (left * right)
-/// - `Div`: Division operation (left / right)
-///
+/// This enum represents the structure of mathematical expressions as a tree,
+/// where each node is either a value or an operation with child nodes.
 /// Operations are stored as boxed expressions to allow for nested structures.
 #[derive(Debug, PartialEq, Clone)]
 pub enum Expr {
+    /// A floating-point numeric literal
+    ///
+    /// Examples: `42.0`, `-3.14`, `0.5`
     Float(f64),
+
+    /// Addition operation: left + right
+    ///
+    /// Represents the sum of two expressions. Both operands are evaluated
+    /// and their results are added together.
     Add(Box<Expr>, Box<Expr>),
+
+    /// Subtraction operation: left - right
+    ///
+    /// Represents the difference between two expressions. The right operand
+    /// is subtracted from the left operand.
     Sub(Box<Expr>, Box<Expr>),
+
+    /// Multiplication operation: left * right
+    ///
+    /// Represents the product of two expressions. Both operands are evaluated
+    /// and their results are multiplied together.
     Mul(Box<Expr>, Box<Expr>),
+
+    /// Division operation: left / right
+    ///
+    /// Represents the quotient of two expressions. The left operand is divided
+    /// by the right operand. Division by zero will result in an evaluation error.
     Div(Box<Expr>, Box<Expr>),
 }
 
@@ -61,13 +71,7 @@ pub enum Expr {
 /// This function handles both positive and negative floating-point numbers.
 /// Examples: "42", "-3.14", "0.5", "-0.25"
 ///
-/// # Arguments
-/// * `input` - The string slice to parse
-///
-/// # Returns
-/// * `IResult<&str, Expr>` - Parser result with remaining input and parsed expression
-///
-/// # Examples
+/// # Example
 /// ```
 /// use ast::parse_number;
 ///
@@ -89,12 +93,6 @@ pub fn parse_number(input: &str) -> IResult<&str, Expr> {
 ///
 /// This function handles expressions like "(3 + 4)" or "((1 + 2) * 3)".
 /// It recursively calls parse_expression to handle nested expressions.
-///
-/// # Arguments
-/// * `input` - The string slice to parse
-///
-/// # Returns
-/// * `IResult<&str, Expr>` - Parser result with remaining input and parsed expression
 fn parse_parenthesized(input: &str) -> IResult<&str, Expr> {
     let (input, _) = char('(')(input)?; // Consume opening parenthesis
     let (input, expr) = parse_expression(input)?; // Parse the inner expression
@@ -109,12 +107,6 @@ fn parse_parenthesized(input: &str) -> IResult<&str, Expr> {
 /// - A parenthesized expression (e.g., "(1 + 2)")
 ///
 /// This function tries parentheses first, then falls back to parsing a number.
-///
-/// # Arguments
-/// * `input` - The string slice to parse
-///
-/// # Returns
-/// * `IResult<&str, Expr>` - Parser result with remaining input and parsed expression
 fn parse_factor(input: &str) -> IResult<&str, Expr> {
     let (input, _) = multispace0(input)?; // Skip any leading whitespace
 
@@ -127,6 +119,16 @@ fn parse_factor(input: &str) -> IResult<&str, Expr> {
     }
 }
 
+/// Helper function to try parsing one of several characters
+fn try_parse_operator<'a>(input: &'a str, operators: &[char]) -> Option<(char, &'a str)> {
+    for &op in operators {
+        if let Ok((remaining, _)) = char::<&str, nom::error::Error<&str>>(op)(input) {
+            return Some((op, remaining));
+        }
+    }
+    None
+}
+
 /// Parse multiplication and division (higher precedence)
 ///
 /// This function implements the parsing of multiplication (*) and division (/) operations.
@@ -134,17 +136,6 @@ fn parse_factor(input: &str) -> IResult<&str, Expr> {
 /// are evaluated first in expressions like "2 + 3 * 4" (which becomes "2 + (3 * 4)").
 ///
 /// The function uses left-associativity, so "8 / 4 / 2" becomes "((8 / 4) / 2) = 1".
-///
-/// # Arguments
-/// * `input` - The string slice to parse
-///
-/// # Returns
-/// * `IResult<&str, Expr>` - Parser result with remaining input and parsed expression
-///
-/// # Grammar
-/// ```text
-/// term = factor (("*" | "/") factor)*
-/// ```
 fn parse_term(input: &str) -> IResult<&str, Expr> {
     let (mut remaining, mut left) = parse_factor(input)?;
 
@@ -153,17 +144,13 @@ fn parse_term(input: &str) -> IResult<&str, Expr> {
         let (input_after_whitespace, _) = multispace0(remaining)?;
 
         // Try to parse multiplication or division operator
-        if let Ok((new_input, _)) =
-            char::<&str, nom::error::Error<&str>>('*')(input_after_whitespace)
-        {
+        if let Some((op, new_input)) = try_parse_operator(input_after_whitespace, &['*', '/']) {
             let (new_input, right) = parse_factor(new_input)?;
-            left = Expr::Mul(Box::new(left), Box::new(right));
-            remaining = new_input;
-        } else if let Ok((new_input, _)) =
-            char::<&str, nom::error::Error<&str>>('/')(input_after_whitespace)
-        {
-            let (new_input, right) = parse_factor(new_input)?;
-            left = Expr::Div(Box::new(left), Box::new(right));
+            left = match op {
+                '*' => Expr::Mul(Box::new(left), Box::new(right)),
+                '/' => Expr::Div(Box::new(left), Box::new(right)),
+                _ => unreachable!(),
+            };
             remaining = new_input;
         } else {
             break; // No more multiplication or division operators
@@ -181,20 +168,7 @@ fn parse_term(input: &str) -> IResult<&str, Expr> {
 ///
 /// The function implements left-associativity, so "10 - 3 - 2" becomes "((10 - 3) - 2) = 5".
 ///
-/// # Arguments
-/// * `input` - The string slice to parse
-///
-/// # Returns
-/// * `IResult<&str, Expr>` - Parser result with remaining input and parsed expression
-///
-/// # Grammar
-/// ```text
-/// expression = term (("+" | "-") term)*
-/// term = factor (("*" | "/") factor)*
-/// factor = number | "(" expression ")"
-/// ```
-///
-/// # Examples
+/// # Example
 /// ```
 /// use ast::{parse_expression, Expr};
 ///
@@ -226,17 +200,13 @@ pub fn parse_expression(input: &str) -> IResult<&str, Expr> {
         let (input_after_whitespace, _) = multispace0(remaining)?;
 
         // Try to parse addition or subtraction operator
-        if let Ok((new_input, _)) =
-            char::<&str, nom::error::Error<&str>>('+')(input_after_whitespace)
-        {
+        if let Some((op, new_input)) = try_parse_operator(input_after_whitespace, &['+', '-']) {
             let (new_input, right) = parse_term(new_input)?;
-            left = Expr::Add(Box::new(left), Box::new(right));
-            remaining = new_input;
-        } else if let Ok((new_input, _)) =
-            char::<&str, nom::error::Error<&str>>('-')(input_after_whitespace)
-        {
-            let (new_input, right) = parse_term(new_input)?;
-            left = Expr::Sub(Box::new(left), Box::new(right));
+            left = match op {
+                '+' => Expr::Add(Box::new(left), Box::new(right)),
+                '-' => Expr::Sub(Box::new(left), Box::new(right)),
+                _ => unreachable!(),
+            };
             remaining = new_input;
         } else {
             break; // No more addition or subtraction operators
@@ -252,16 +222,7 @@ pub fn parse_expression(input: &str) -> IResult<&str, Expr> {
 /// the final numeric value. It handles all mathematical operations defined in the
 /// `Expr` enum and provides proper error handling for division by zero.
 ///
-/// # Arguments
-/// * `expr` - The AST expression to evaluate
-///
-/// # Returns
-/// * `Result<f64, EvaluationError>` - The computed result or an error
-///
-/// # Errors
-/// * `EvaluationError::DivisionByZero` - When attempting to divide by zero
-///
-/// # Examples
+/// # Example
 /// ```
 /// use ast::{parse_expression, evaluate, Expr, EvaluationError};
 ///
@@ -292,27 +253,11 @@ pub fn evaluate(expr: &Expr) -> Result<f64, EvaluationError> {
     }
 }
 
-/// Comprehensive test suite for the AST calculator
-///
-/// This module contains extensive tests that verify:
-/// - Correct parsing and evaluation of various mathematical expressions
-/// - Proper operator precedence (multiplication before addition)
-/// - Parentheses override precedence rules
-/// - Error handling for division by zero
-/// - Rejection of invalid syntax
 #[cfg(test)]
 mod tests {
     use super::*;
 
     /// Test parsing and evaluation of valid mathematical expressions
-    ///
-    /// This test covers a wide range of valid expressions including:
-    /// - Basic arithmetic operations
-    /// - Operator precedence
-    /// - Parentheses grouping
-    /// - Decimal numbers
-    /// - Negative numbers
-    /// - Complex nested expressions
     #[test]
     fn test_valid_expressions() {
         let test_cases = [
@@ -358,9 +303,6 @@ mod tests {
     }
 
     /// Test that division by zero is properly handled
-    ///
-    /// This test ensures that dividing by zero returns the appropriate error
-    /// rather than causing a panic or returning an invalid result.
     #[test]
     fn test_division_by_zero() {
         match parse_expression("8 / 0") {
@@ -375,9 +317,6 @@ mod tests {
     }
 
     /// Test that invalid expressions are properly rejected
-    ///
-    /// This test ensures that malformed expressions fail to parse completely
-    /// or leave significant unparsed input, indicating a syntax error.
     #[test]
     fn test_invalid_expressions() {
         let invalid_expressions = [
@@ -416,9 +355,6 @@ mod tests {
     }
 
     /// Test that operator precedence is correctly implemented
-    ///
-    /// This test verifies that multiplication has higher precedence than addition,
-    /// meaning "2 + 3 * 4" should be parsed as "2 + (3 * 4)" not "(2 + 3) * 4".
     #[test]
     fn test_operator_precedence() {
         // Test that multiplication has higher precedence than addition
@@ -438,9 +374,6 @@ mod tests {
     }
 
     /// Test that parentheses can override operator precedence
-    ///
-    /// This test verifies that parentheses force different grouping,
-    /// so "(2 + 3) * 4" should be parsed as "(2 + 3) * 4", not "2 + (3 * 4)".
     #[test]
     fn test_parentheses_override_precedence() {
         // Test that parentheses can override precedence

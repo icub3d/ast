@@ -3,13 +3,6 @@ use std::io::{self, Write};
 
 /// Main function - Entry point for the interactive REPL
 ///
-/// This function provides a Read-Eval-Print Loop (REPL) interface that allows users
-/// to interactively test mathematical expressions. For each input:
-/// 1. Parses the expression into an AST
-/// 2. Displays the AST structure
-/// 3. Evaluates the AST to get the numeric result
-/// 4. Shows any errors that occur during parsing or evaluation
-///
 /// The REPL continues until the user types "quit" or "exit".
 fn main() {
     println!("🧮 AST Calculator REPL");
@@ -42,16 +35,13 @@ fn main() {
                 // Parse and evaluate the expression
                 match parse_expression(input) {
                     Ok((remaining, ast)) => {
-                        // Show the Abstract Syntax Tree for educational purposes
                         println!("🌳 AST: {:?}", ast);
 
-                        // Evaluate the AST to get the numeric result
                         match evaluate(&ast) {
                             Ok(result) => println!("✅ result: {}", result),
                             Err(error) => println!("❌ evaluating: {}", error),
                         }
 
-                        // Warn if there's unparsed input (indicates syntax error)
                         if !remaining.trim().is_empty() {
                             println!("⚠️ unparsed input: '{}'", remaining);
                         }
@@ -60,7 +50,7 @@ fn main() {
                         println!("🚫 parsing: {:?}", error);
                     }
                 }
-                println!(); // Add spacing between inputs
+                println!(); 
             }
             Err(error) => {
                 println!("❌ reading input: {}", error);
