@@ -64,6 +64,12 @@ pub enum Expr {
     /// Represents the quotient of two expressions. The left operand is divided
     /// by the right operand. Division by zero will result in an evaluation error.
     Div(Box<Expr>, Box<Expr>),
+
+    /// Negation operation: -expr
+    ///
+    /// Represents the negation of an expression (unary minus).
+    /// Example: `-x` or `-(2 / 1)`
+    Neg(Box<Expr>),
 }
 
 /// Parse a number into an Expr::Float (supports decimals and negative numbers)
@@ -109,6 +115,12 @@ fn parse_parenthesized(input: &str) -> IResult<&str, Expr> {
 /// This function tries parentheses first, then falls back to parsing a number.
 fn parse_factor(input: &str) -> IResult<&str, Expr> {
     let (input, _) = multispace0(input)?; // Skip any leading whitespace
+
+    // Handle unary minus (negation)
+    if let Ok((input, _)) = char::<&str, nom::error::Error<&str>>('-')(input) {
+        let (input, expr) = parse_factor(input)?;
+        return Ok((input, Expr::Neg(Box::new(expr))));
+    }
 
     // Try parsing parenthesized expression first
     if let Ok((input, expr)) = parse_parenthesized(input) {
@@ -250,6 +262,7 @@ pub fn evaluate(expr: &Expr) -> Result<f64, EvaluationError> {
                 Ok(evaluate(left)? / denominator)
             }
         }
+        Expr::Neg(inner) => Ok(-evaluate(inner)?),
     }
 }
 
@@ -271,6 +284,9 @@ mod tests {
             ("-3.5 * 2", -7.0),           // Negative decimal
             ("10.5 / -2.1", -5.0),        // Division with negative
             ("-1.5 + -2.5", -4.0),        // Two negative numbers
+            ("2 + -(2 / 1)", 0.0),        // Negation of subexpression
+            ("-(3 + 4) * 2", -14.0),      // Negation with parentheses
+            ("-(-5)", 5.0),               // Double negation
         ];
 
         for (expression, expected) in &test_cases {
