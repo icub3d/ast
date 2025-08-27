@@ -15,18 +15,36 @@
 //! // The AST structure is: Add(Float(3.0), Mul(Float(4.0), Float(2.0)))
 //! ```
 
+use nom::Finish;
 use nom::{
     IResult,
-    character::complete::{char, multispace0},
+    branch::alt,
+    character::complete::{char, multispace0, one_of},
+    combinator::{all_consuming, map},
+    multi::fold_many0,
     number::complete::double,
+    sequence::{delimited, preceded, terminated},
 };
 use thiserror::Error;
 
 /// Errors that can occur during expression evaluation
-#[derive(Error, Debug)]
+#[derive(Error, Debug, PartialEq)]
 pub enum EvaluationError {
     #[error("Division by zero")]
     DivisionByZero,
+    #[error("Modulo by zero")]
+    ModuloByZero,
+}
+
+/// A top-level error type that encapsulates all possible failures
+#[derive(Error, Debug)]
+pub enum CalcError {
+    /// An error that occurs during the evaluation of the AST
+    #[error(transparent)]
+    Evaluation(#[from] EvaluationError),
+    /// An error that occurs during the parsing of an expression
+    #[error("Parse error: {0}")]
+    Parse(String),
 }
 
 /// Abstract Syntax Tree representation of mathematical expressions
@@ -65,6 +83,16 @@ pub enum Expr {
     /// by the right operand. Division by zero will result in an evaluation error.
     Div(Box<Expr>, Box<Expr>),
 
+    /// Power operation: left ^ right
+    ///
+    /// Represents exponentiation. This operation is right-associative.
+    Power(Box<Expr>, Box<Expr>),
+
+    /// Modulo operation: left % right
+    ///
+    /// Represents the remainder of a division.
+    Modulo(Box<Expr>, Box<Expr>),
+
     /// Negation operation: -expr
     ///
     /// Represents the negation of an expression (unary minus).
@@ -95,90 +123,94 @@ pub fn parse_number(input: &str) -> IResult<&str, Expr> {
     Ok((input, Expr::Float(num)))
 }
 
-/// Parse an expression wrapped in parentheses
+use nom::Parser;
+
+/// A top-level parser that consumes the entire input and provides a clean error API
 ///
-/// This function handles expressions like "(3 + 4)" or "((1 + 2) * 3)".
-/// It recursively calls parse_expression to handle nested expressions.
+/// This function is the public entry point for parsing expressions. It ensures that
+/// the entire input string is consumed, and it converts `nom`'s internal error
+/// types into a user-friendly `CalcError::Parse`.
+pub fn parse(input: &str) -> Result<Expr, CalcError> {
+    match all_consuming(parse_expression).parse(input).finish() {
+        Ok((_, ast)) => Ok(ast),
+        Err(e) => Err(CalcError::Parse(format!(
+            "Invalid syntax near: '{}'",
+            e.input
+        ))),
+    }
+}
+
+/// Parse an expression wrapped in parentheses, handling surrounding whitespace
+///
+/// This function handles expressions like `(3 + 4)` or `( (1 + 2) * 3 )`.
+/// It uses `nom`'s `delimited` combinator to handle the parentheses and
+/// `preceded`/`terminated` to manage whitespace within the parentheses.
 fn parse_parenthesized(input: &str) -> IResult<&str, Expr> {
-    let (input, _) = char('(')(input)?; // Consume opening parenthesis
-    let (input, expr) = parse_expression(input)?; // Parse the inner expression
-    let (input, _) = char(')')(input)?; // Consume closing parenthesis
-    Ok((input, expr))
+    delimited(
+        char('('),
+        preceded(multispace0, terminated(parse_expression, multispace0)),
+        char(')'),
+    )
+    .parse(input)
 }
 
-/// Parse a factor (number or parenthesized expression)
+/// Parse a primary expression (a number or a parenthesized expression)
 ///
-/// A factor is the most basic unit in our grammar hierarchy:
-/// - A number (e.g., "42", "-3.14")
-/// - A parenthesized expression (e.g., "(1 + 2)")
-///
-/// This function tries parentheses first, then falls back to parsing a number.
-fn parse_factor(input: &str) -> IResult<&str, Expr> {
-    let (input, _) = multispace0(input)?; // Skip any leading whitespace
+/// This is the most basic unit in the grammar.
+fn parse_primary(input: &str) -> IResult<&str, Expr> {
+    preceded(multispace0, alt((parse_parenthesized, parse_number))).parse(input)
+}
 
-    // Handle unary minus (negation)
-    if let Ok((input, _)) = char::<&str, nom::error::Error<&str>>('-')(input) {
-        let (input, expr) = parse_factor(input)?;
-        return Ok((input, Expr::Neg(Box::new(expr))));
-    }
-
-    // Try parsing parenthesized expression first
-    if let Ok((input, expr)) = parse_parenthesized(input) {
-        Ok((input, expr))
+/// Parse the exponentiation operator (right-associative)
+fn parse_power(input: &str) -> IResult<&str, Expr> {
+    let (input, left) = parse_primary(input)?;
+    let (input, maybe_op) = nom::combinator::opt(preceded(multispace0, char('^'))).parse(input)?;
+    if maybe_op.is_some() {
+        let (input, right) = parse_power(input)?;
+        Ok((input, Expr::Power(Box::new(left), Box::new(right))))
     } else {
-        // Fall back to parsing a number
-        parse_number(input)
+        Ok((input, left))
     }
 }
 
-/// Helper function to try parsing one of several characters
-fn try_parse_operator<'a>(input: &'a str, operators: &[char]) -> Option<(char, &'a str)> {
-    for &op in operators {
-        if let Ok((remaining, _)) = char::<&str, nom::error::Error<&str>>(op)(input) {
-            return Some((op, remaining));
-        }
-    }
-    None
+/// Parse unary minus.
+fn parse_unary(input: &str) -> IResult<&str, Expr> {
+    alt((
+        map(
+            preceded(preceded(multispace0, char('-')), parse_unary),
+            |expr| Expr::Neg(Box::new(expr)),
+        ),
+        parse_power,
+    ))
+    .parse(input)
 }
 
-/// Parse multiplication and division (higher precedence)
-///
-/// This function implements the parsing of multiplication (*) and division (/) operations.
-/// These operations have higher precedence than addition and subtraction, meaning they
-/// are evaluated first in expressions like "2 + 3 * 4" (which becomes "2 + (3 * 4)").
-///
-/// The function uses left-associativity, so "8 / 4 / 2" becomes "((8 / 4) / 2) = 1".
+/// Parse multiplication, division, and modulo (higher precedence than addition)
 fn parse_term(input: &str) -> IResult<&str, Expr> {
-    let (mut remaining, mut left) = parse_factor(input)?;
+    let (input, left) = parse_unary(input)?;
 
-    // Continue parsing multiplication and division operations
-    loop {
-        let (input_after_whitespace, _) = multispace0(remaining)?;
-
-        // Try to parse multiplication or division operator
-        if let Some((op, new_input)) = try_parse_operator(input_after_whitespace, &['*', '/']) {
-            let (new_input, right) = parse_factor(new_input)?;
-            left = match op {
-                '*' => Expr::Mul(Box::new(left), Box::new(right)),
-                '/' => Expr::Div(Box::new(left), Box::new(right)),
-                _ => unreachable!(),
-            };
-            remaining = new_input;
-        } else {
-            break; // No more multiplication or division operators
-        }
-    }
-
-    Ok((remaining, left))
+    fold_many0(
+        (
+            preceded(multispace0, one_of("*/%")),
+            preceded(multispace0, parse_unary),
+        ),
+        move || left.clone(),
+        |acc, (op, right)| match op {
+            '*' => Expr::Mul(Box::new(acc), Box::new(right)),
+            '/' => Expr::Div(Box::new(acc), Box::new(right)),
+            '%' => Expr::Modulo(Box::new(acc), Box::new(right)),
+            _ => unreachable!(),
+        },
+    )
+    .parse(input)
 }
 
 /// Parse addition and subtraction (lower precedence)
 ///
-/// This is the main entry point for parsing mathematical expressions.
-/// It handles addition (+) and subtraction (-) operations, which have the lowest
-/// precedence in our operator hierarchy.
-///
-/// The function implements left-associativity, so "10 - 3 - 2" becomes "((10 - 3) - 2) = 5".
+/// This is the main entry point for parsing mathematical expressions. It uses
+/// `fold_many0` to parse a left-associative chain of addition and subtraction
+/// operations. It starts by parsing a `term` and then repeatedly parses `+` or
+/// `-` followed by another `term`.
 ///
 /// # Example
 /// ```
@@ -205,27 +237,21 @@ fn parse_term(input: &str) -> IResult<&str, Expr> {
 /// }
 /// ```
 pub fn parse_expression(input: &str) -> IResult<&str, Expr> {
-    let (mut remaining, mut left) = parse_term(input)?;
+    let (input, left) = parse_term(input)?;
 
-    // Continue parsing addition and subtraction operations
-    loop {
-        let (input_after_whitespace, _) = multispace0(remaining)?;
-
-        // Try to parse addition or subtraction operator
-        if let Some((op, new_input)) = try_parse_operator(input_after_whitespace, &['+', '-']) {
-            let (new_input, right) = parse_term(new_input)?;
-            left = match op {
-                '+' => Expr::Add(Box::new(left), Box::new(right)),
-                '-' => Expr::Sub(Box::new(left), Box::new(right)),
-                _ => unreachable!(),
-            };
-            remaining = new_input;
-        } else {
-            break; // No more addition or subtraction operators
-        }
-    }
-
-    Ok((remaining, left))
+    fold_many0(
+        (
+            preceded(multispace0, one_of("+-")),
+            preceded(multispace0, parse_term),
+        ),
+        move || left.clone(),
+        |acc, (op, right)| match op {
+            '+' => Expr::Add(Box::new(acc), Box::new(right)),
+            '-' => Expr::Sub(Box::new(acc), Box::new(right)),
+            _ => unreachable!(),
+        },
+    )
+    .parse(input)
 }
 
 /// Evaluate an AST expression to a numeric result
@@ -262,6 +288,19 @@ pub fn evaluate(expr: &Expr) -> Result<f64, EvaluationError> {
                 Ok(evaluate(left)? / denominator)
             }
         }
+        Expr::Power(left, right) => {
+            let left_val = evaluate(left)?;
+            let right_val = evaluate(right)?;
+            Ok(left_val.powf(right_val))
+        }
+        Expr::Modulo(left, right) => {
+            let right_val = evaluate(right)?;
+            if right_val == 0.0 {
+                Err(EvaluationError::ModuloByZero)
+            } else {
+                Ok(evaluate(left)? % right_val)
+            }
+        }
         Expr::Neg(inner) => Ok(-evaluate(inner)?),
     }
 }
@@ -274,46 +313,61 @@ mod tests {
     #[test]
     fn test_valid_expressions() {
         let test_cases = [
-            ("1 + 2 * (3 - 4) / 5", 0.6), // Complex expression with precedence
-            ("42", 42.0),                 // Simple number
-            ("(1 + 2) * 3", 9.0),         // Parentheses override precedence
-            ("10 / 2 + 3 * 4", 17.0),     // Mixed operations
-            ("1 + 2 + 3 + 4", 10.0),      // Chain of additions
-            ("3.14 + 2.86", 6.0),         // Decimal numbers
-            ("-5 + 10", 5.0),             // Negative numbers
-            ("-3.5 * 2", -7.0),           // Negative decimal
-            ("10.5 / -2.1", -5.0),        // Division with negative
-            ("-1.5 + -2.5", -4.0),        // Two negative numbers
-            ("2 + -(2 / 1)", 0.0),        // Negation of subexpression
-            ("-(3 + 4) * 2", -14.0),      // Negation with parentheses
-            ("-(-5)", 5.0),               // Double negation
+            // Basic operations
+            ("42", 42.0),
+            ("1 + 2", 3.0),
+            ("10 - 3", 7.0),
+            ("5 * 4", 20.0),
+            ("20 / 4", 5.0),
+            ("10 % 3", 1.0),
+            // Operator precedence
+            ("10 / 2 + 3 * 4", 17.0),
+            ("10 % 3 * 2", 2.0),
+            // Parentheses
+            ("(1 + 2) * 3", 9.0),
+            // Negative numbers and unary minus
+            ("-5 + 10", 5.0),
+            ("10 - -5", 15.0),
+            ("-3.5 * 2", -7.0),
+            ("10.5 / -2.1", -5.0),
+            ("-1.5 + -2.5", -4.0),
+            ("5 * -3", -15.0),
+            ("5 * - 3", -15.0),
+            ("- 5", -5.0),
+            // Negation of subexpressions
+            ("2 + -(2 / 1)", 0.0),
+            ("-(3 + 4) * 2", -14.0),
+            ("-(-5)", 5.0),
+            // Exponentiation
+            ("2^3", 8.0),
+            ("2 ^ 3", 8.0),
+            ("-2^4", -16.0), // -(2^4)
+            ("(-2)^4", 16.0),
+            ("2^3^2", 512.0),  // Right-associativity: 2^(3^2)
+            ("(2^3)^2", 64.0), // vs. (2^3)^2
+            ("10 / 2^2", 2.5), // Precedence: 10 / (2^2)
+            ("2 * 3^2", 18.0), // Precedence: 2 * (3^2)
+            ("2 + 3^2", 11.0), // Precedence: 2 + (3^2)
+            // Complex expressions
+            ("1 + 2 * (3 - 4) / 5", 0.6),
+            ("3.14 + 2.86", 6.0),
         ];
 
         for (expression, expected) in &test_cases {
-            match parse_expression(expression) {
-                Ok((remaining, ast)) => {
-                    // Ensure the entire expression was parsed
-                    assert!(
-                        remaining.trim().is_empty(),
-                        "Unparsed input: '{}'",
-                        remaining
-                    );
-
-                    // Evaluate and check the result
-                    match evaluate(&ast) {
-                        Ok(result) => {
-                            assert!(
-                                (result - expected).abs() < 1e-10,
-                                "Expression '{}': expected {}, got {}",
-                                expression,
-                                expected,
-                                result
-                            );
-                        }
-                        Err(error) => panic!("Evaluation failed for '{}': {}", expression, error),
+            match parse(expression) {
+                Ok(ast) => match evaluate(&ast) {
+                    Ok(result) => {
+                        assert!(
+                            (result - expected).abs() < 1e-10,
+                            "Expression '{}': expected {}, got {}",
+                            expression,
+                            expected,
+                            result
+                        );
                     }
-                }
-                Err(error) => panic!("Parse failed for '{}': {:?}", expression, error),
+                    Err(error) => panic!("Evaluation failed for '{}': {}", expression, error),
+                },
+                Err(error) => panic!("Parse failed for '{}': {}", expression, error),
             }
         }
     }
@@ -321,14 +375,20 @@ mod tests {
     /// Test that division by zero is properly handled
     #[test]
     fn test_division_by_zero() {
-        match parse_expression("8 / 0") {
-            Ok((_, ast)) => {
-                match evaluate(&ast) {
-                    Err(EvaluationError::DivisionByZero) => (), // Expected
-                    Ok(result) => panic!("Expected division by zero error, got {}", result),
-                }
-            }
-            Err(error) => panic!("Parse failed: {:?}", error),
+        let result = parse("8 / 0").and_then(|ast| evaluate(&ast).map_err(CalcError::from));
+        match result {
+            Err(CalcError::Evaluation(EvaluationError::DivisionByZero)) => {} // Expected
+            _ => panic!("Expected a division by zero evaluation error"),
+        }
+    }
+
+    /// Test that modulo by zero is properly handled
+    #[test]
+    fn test_modulo_by_zero() {
+        let result = parse("10 % 0").and_then(|ast| evaluate(&ast).map_err(CalcError::from));
+        match result {
+            Err(CalcError::Evaluation(EvaluationError::ModuloByZero)) => {} // Expected
+            _ => panic!("Expected a modulo by zero evaluation error"),
         }
     }
 
@@ -351,60 +411,53 @@ mod tests {
             "(((",        // Invalid: only opening parentheses
             ")))",        // Invalid: only closing parentheses
             "5 + ()",     // Invalid: empty parentheses
+            "5 ^ ^ 3",    // Invalid: double exponent
         ];
 
         for expression in &invalid_expressions {
-            match parse_expression(expression) {
-                Ok((remaining, _)) => {
-                    // Some expressions might partially parse, which is acceptable
-                    // as long as there's significant remaining input
-                    if remaining.trim().is_empty() {
-                        panic!(
-                            "Expression '{}' should not have parsed completely",
-                            expression
-                        );
-                    }
-                }
-                Err(_) => (), // Expected failure
-            }
+            assert!(
+                parse(expression).is_err(),
+                "Expression '{}' should have failed to parse",
+                expression
+            );
         }
     }
 
     /// Test that operator precedence is correctly implemented
     #[test]
     fn test_operator_precedence() {
-        // Test that multiplication has higher precedence than addition
-        match parse_expression("2 + 3 * 4") {
-            Ok((_, ast)) => {
-                // Should parse as Add(2, Mul(3, 4)), not Mul(Add(2, 3), 4)
-                match ast {
-                    Expr::Add(left, right) => {
-                        assert!(matches!(left.as_ref(), Expr::Float(2.0)));
-                        assert!(matches!(right.as_ref(), Expr::Mul(_, _)));
-                    }
-                    _ => panic!("Expected Add at top level, got {:?}", ast),
-                }
+        // Test: 2 + 3 * 4 -> Add(2, Mul(3, 4))
+        let ast = parse("2 + 3 * 4").unwrap();
+        match ast {
+            Expr::Add(left, right) => {
+                assert!(matches!(*left, Expr::Float(2.0)));
+                assert!(matches!(*right, Expr::Mul(_, _)));
             }
-            Err(error) => panic!("Parse failed: {:?}", error),
+            _ => panic!("Expected Add at top level, got {:?}", ast),
+        }
+
+        // Test: 2 * 3 ^ 2 -> Mul(2, Power(3, 2))
+        let ast = parse("2 * 3^2").unwrap();
+        match ast {
+            Expr::Mul(left, right) => {
+                assert!(matches!(*left, Expr::Float(2.0)));
+                assert!(matches!(*right, Expr::Power(_, _)));
+            }
+            _ => panic!("Expected Mul at top level, got {:?}", ast),
         }
     }
 
     /// Test that parentheses can override operator precedence
     #[test]
     fn test_parentheses_override_precedence() {
-        // Test that parentheses can override precedence
-        match parse_expression("(2 + 3) * 4") {
-            Ok((_, ast)) => {
-                // Should parse as Mul(Add(2, 3), 4)
-                match ast {
-                    Expr::Mul(left, right) => {
-                        assert!(matches!(left.as_ref(), Expr::Add(_, _)));
-                        assert!(matches!(right.as_ref(), Expr::Float(4.0)));
-                    }
-                    _ => panic!("Expected Mul at top level, got {:?}", ast),
-                }
+        // Test: (2 + 3) * 4 -> Mul(Add(2, 3), 4)
+        let ast = parse("(2 + 3) * 4").unwrap();
+        match ast {
+            Expr::Mul(left, right) => {
+                assert!(matches!(*left, Expr::Add(_, _)));
+                assert!(matches!(*right, Expr::Float(4.0)));
             }
-            Err(error) => panic!("Parse failed: {:?}", error),
+            _ => panic!("Expected Mul at top level, got {:?}", ast),
         }
     }
 }
