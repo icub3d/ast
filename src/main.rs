@@ -1,4 +1,4 @@
-use ast::{evaluate, parse_expression};
+use ast::{evaluate, parse};
 use std::io::{self, Write};
 
 /// Main function - Entry point for the interactive REPL
@@ -12,7 +12,10 @@ fn main() {
 
     loop {
         print!(">>> ");
-        io::stdout().flush().unwrap();
+        if io::stdout().flush().is_err() {
+            // Stop the REPL if we can't write to stdout
+            break;
+        }
 
         let mut input = String::new();
         match io::stdin().read_line(&mut input) {
@@ -33,27 +36,22 @@ fn main() {
                 }
 
                 // Parse and evaluate the expression
-                match parse_expression(input) {
-                    Ok((remaining, ast)) => {
+                match parse(input) {
+                    Ok(ast) => {
                         println!("🌳 AST: {:?}", ast);
-
                         match evaluate(&ast) {
-                            Ok(result) => println!("✅ result: {}", result),
-                            Err(error) => println!("❌ evaluating: {}", error),
-                        }
-
-                        if !remaining.trim().is_empty() {
-                            println!("⚠️ unparsed input: '{}'", remaining);
+                            Ok(result) => println!("✅ Result: {}", result),
+                            Err(error) => println!("❌ Evaluation error: {}", error),
                         }
                     }
                     Err(error) => {
-                        println!("🚫 parsing: {:?}", error);
+                        println!("❌ Error: {}", error);
                     }
                 }
-                println!(); 
+                println!();
             }
             Err(error) => {
-                println!("❌ reading input: {}", error);
+                println!("❌ Error reading input: {}", error);
                 break;
             }
         }
