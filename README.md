@@ -1,3 +1,6 @@
+> [!IMPORTANT]
+> This repository has been migrated to [git.marsh.gg/icub3d/ast](https://git.marsh.gg/icub3d/ast). Please use the new URL for any future issues, pull requests, or clones.
+
 # 🧮 AST Calculator
 
 An example calculator meant to illustrate Abstract Syntax Trees (AST, https://en.wikipedia.org/wiki/Abstract_syntax_tree). This is meant to be a first look at what ASTs are and how they can be used.
